@@ -9,11 +9,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import secrets
 
-# ========== CONFIG ==========
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-# ========== CRYPTO UTILS ==========
 
 def generate_ecc_keys():
     private_key = ec.generate_private_key(ec.SECP384R1())
