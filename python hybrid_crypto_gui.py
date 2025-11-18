@@ -1,272 +1,308 @@
 import os
 import threading
+import secrets
 import tkinter as tk
 from tkinter import filedialog, simpledialog, messagebox
 import customtkinter as ctk
+
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-import secrets
 
-ctk.set_appearance_mode("dark")
+ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-
-def generate_ecc_keys():
-    private_key = ec.generate_private_key(ec.SECP384R1())
-    public_key = private_key.public_key()
-    return private_key, public_key
-
-def save_keys(private_key, public_key, password: bytes, folder="keys"):
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-
-    # Save password-protected private key
-    with open(os.path.join(folder, "private_key.pem"), "wb") as f:
-        f.write(
-            private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.BestAvailableEncryption(password),
-            )
-        )
-
-    # Save public key
-    with open(os.path.join(folder, "public_key.pem"), "wb") as f:
-        f.write(
-            public_key.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-        )
-
-def load_keys(password: bytes, folder="keys"):
-    try:
-        with open(os.path.join(folder, "private_key.pem"), "rb") as f:
-            private_key = serialization.load_pem_private_key(f.read(), password=password)
-
-        with open(os.path.join(folder, "public_key.pem"), "rb") as f:
-            public_key = serialization.load_pem_public_key(f.read())
-
+class CryptoManager:
+    
+    @staticmethod
+    def generate_ecc_keys():
+        private_key = ec.generate_private_key(ec.SECP384R1())
+        public_key = private_key.public_key()
         return private_key, public_key
 
-    except Exception as e:
-        raise ValueError("❌ Failed to load keys. Wrong password or missing files.") from e
+    @staticmethod
+    def save_keys(private_key, public_key, password: bytes, folder="keys"):
+        if not os.path.exists(folder):
+            os.makedirs(folder)
 
+        with open(os.path.join(folder, "private_key.pem"), "wb") as f:
+            f.write(
+                private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.BestAvailableEncryption(password),
+                )
+            )
 
-def hybrid_encrypt(file_path, public_key, progress_callback=None):
-    eph_private_key = ec.generate_private_key(ec.SECP384R1())
-    eph_public_key = eph_private_key.public_key()
-    eph_pub_bytes = eph_public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
+        with open(os.path.join(folder, "public_key.pem"), "wb") as f:
+            f.write(
+                public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                )
+            )
 
-    shared_key = eph_private_key.exchange(ec.ECDH(), public_key)
-    aes_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"ecc-hybrid").derive(shared_key)
-    iv = secrets.token_bytes(16)
+    @staticmethod
+    def load_keys(password: bytes, folder="keys"):
+        try:
+            with open(os.path.join(folder, "private_key.pem"), "rb") as f:
+                private_key = serialization.load_pem_private_key(f.read(), password=password)
 
-    cipher = Cipher(algorithms.AES(aes_key), modes.CFB(iv))
-    encryptor = cipher.encryptor()
+            with open(os.path.join(folder, "public_key.pem"), "rb") as f:
+                public_key = serialization.load_pem_public_key(f.read())
 
-    encrypted_file = file_path + ".enc"
-    total_size = os.path.getsize(file_path)
-    processed = 0
+            return private_key, public_key
+        except Exception as e:
+            raise ValueError("Invalid password or corrupted key files.") from e
 
-    with open(file_path, "rb") as f_in, open(encrypted_file, "wb") as f_out:
-        f_out.write(eph_pub_bytes)
-        f_out.write(b"---IV---")
-        f_out.write(iv)
+    @staticmethod
+    def hybrid_encrypt(file_path, public_key, progress_callback=None):
+        eph_private_key = ec.generate_private_key(ec.SECP384R1())
+        eph_public_key = eph_private_key.public_key()
+        eph_pub_bytes = eph_public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
 
-        while chunk := f_in.read(1024 * 1024):
-            f_out.write(encryptor.update(chunk))
-            processed += len(chunk)
-            if progress_callback:
-                progress_callback(processed / total_size * 100)
+        shared_key = eph_private_key.exchange(ec.ECDH(), public_key)
+        
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=b"ecc-hybrid-gcm"
+        ).derive(shared_key)
 
-        f_out.write(encryptor.finalize())
+        iv = secrets.token_bytes(12)
+        encryptor = Cipher(algorithms.AES(aes_key), modes.GCM(iv)).encryptor()
 
-    if progress_callback:
-        progress_callback(100)
-    return encrypted_file
+        encrypted_file = file_path + ".enc"
+        file_size = os.path.getsize(file_path)
+        processed = 0
 
+        with open(file_path, "rb") as f_in, open(encrypted_file, "wb") as f_out:
+            f_out.write(len(eph_pub_bytes).to_bytes(4, 'big'))
+            f_out.write(eph_pub_bytes)
+            f_out.write(iv)
 
-def hybrid_decrypt(encrypted_file, private_key, progress_callback=None):
-    with open(encrypted_file, "rb") as f_in:
-        data = f_in.read()
+            while True:
+                chunk = f_in.read(1024 * 1024)
+                if not chunk:
+                    break
+                f_out.write(encryptor.update(chunk))
+                processed += len(chunk)
+                if progress_callback:
+                    progress_callback(processed / file_size * 100)
 
-    eph_pub_bytes, rest = data.split(b"---IV---", 1)
-    iv = rest[:16]
-    ciphertext = rest[16:]
+            f_out.write(encryptor.finalize())
+            f_out.write(encryptor.tag)
 
-    shared_key = private_key.exchange(ec.ECDH(), serialization.load_pem_public_key(eph_pub_bytes))
-    aes_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"ecc-hybrid").derive(shared_key)
+        if progress_callback: progress_callback(100)
+        return encrypted_file
 
-    cipher = Cipher(algorithms.AES(aes_key), modes.CFB(iv))
-    decryptor = cipher.decryptor()
+    @staticmethod
+    def hybrid_decrypt(encrypted_file, private_key, progress_callback=None):
+        file_size = os.path.getsize(encrypted_file)
+        
+        with open(encrypted_file, "rb") as f_in:
+            key_len_bytes = f_in.read(4)
+            key_len = int.from_bytes(key_len_bytes, 'big')
+            eph_pub_bytes = f_in.read(key_len)
+            iv = f_in.read(12)
+            
+            header_size = 4 + key_len + 12
+            tag_size = 16
+            ciphertext_size = file_size - header_size - tag_size
+            
+            if ciphertext_size < 0:
+                raise ValueError("File corrupted or not a valid encrypted file.")
 
-    decrypted_file = encrypted_file.replace(".enc", "_decrypted")
-    total_size = len(ciphertext)
-    processed = 0
+            try:
+                peer_public_key = serialization.load_pem_public_key(eph_pub_bytes)
+                shared_key = private_key.exchange(ec.ECDH(), peer_public_key)
+                aes_key = HKDF(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=None,
+                    info=b"ecc-hybrid-gcm"
+                ).derive(shared_key)
+            except Exception as e:
+                raise ValueError("Key exchange failed.") from e
 
-    with open(decrypted_file, "wb") as f_out:
-        for i in range(0, len(ciphertext), 1024 * 1024):
-            chunk = ciphertext[i:i + 1024 * 1024]
-            f_out.write(decryptor.update(chunk))
-            processed += len(chunk)
-            if progress_callback:
-                progress_callback(processed / total_size * 100)
+            f_in.seek(-16, 2) 
+            tag = f_in.read(16)
+            
+            f_in.seek(header_size)
+            
+            decryptor = Cipher(algorithms.AES(aes_key), modes.GCM(iv, tag)).decryptor()
+            
+            decrypted_file = encrypted_file.replace(".enc", "_decrypted")
+            processed = 0
 
-        f_out.write(decryptor.finalize())
+            with open(decrypted_file, "wb") as f_out:
+                bytes_remaining = ciphertext_size
+                
+                while bytes_remaining > 0:
+                    chunk_size = min(1024 * 1024, bytes_remaining)
+                    chunk = f_in.read(chunk_size)
+                    f_out.write(decryptor.update(chunk))
+                    processed += len(chunk)
+                    bytes_remaining -= len(chunk)
+                    
+                    if progress_callback:
+                        progress_callback(processed / ciphertext_size * 100)
 
-    if progress_callback:
-        progress_callback(100)
-    return decrypted_file
+                f_out.write(decryptor.finalize())
 
-# ========== GUI ==========
+        if progress_callback: progress_callback(100)
+        return decrypted_file
+
 
 class CipherFusionECC(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("CipherFusion ECC 🔐 - Hybrid Cryptography")
-        self.geometry("750x580")
+        self.title("CipherFusion ECC 🛡️ - Secure Hybrid Encryption")
+        self.geometry("750x600")
         self.resizable(False, False)
 
         self.private_key = None
         self.public_key = None
+        
+        self.grid_columnconfigure(0, weight=1)
         self.create_widgets()
-        self.bind_drag_drop()
 
     def create_widgets(self):
-        self.label = ctk.CTkLabel(self, text="CipherFusion ECC 🔐", font=("Segoe UI", 28, "bold"))
-        self.label.pack(pady=15)
+        self.label = ctk.CTkLabel(self, text="CipherFusion ECC 🛡️", font=("Roboto", 28, "bold"))
+        self.label.pack(pady=20)
 
-        self.file_entry = ctk.CTkEntry(self, placeholder_text="Drop a file or select manually...", width=500)
-        self.file_entry.pack(pady=10)
+        self.file_frame = ctk.CTkFrame(self)
+        self.file_frame.pack(pady=10, padx=20, fill="x")
+        
+        self.file_entry = ctk.CTkEntry(self.file_frame, placeholder_text="Select a file...", height=35)
+        self.file_entry.pack(side="left", expand=True, fill="x", padx=10, pady=10)
+        
+        self.browse_btn = ctk.CTkButton(self.file_frame, text="Browse", width=100, command=self.browse_file)
+        self.browse_btn.pack(side="right", padx=10, pady=10)
 
-        self.browse_btn = ctk.CTkButton(self, text="Browse File", command=self.browse_file)
-        self.browse_btn.pack(pady=5)
+        self.action_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.action_frame.pack(pady=10)
 
-        self.encrypt_btn = ctk.CTkButton(self, text="Encrypt File", fg_color="#007BFF", command=self.encrypt_file)
-        self.encrypt_btn.pack(pady=10)
+        self.encrypt_btn = ctk.CTkButton(self.action_frame, text="🔒 Encrypt File", fg_color="#1f6aa5", width=160, height=40, command=self.encrypt_file)
+        self.encrypt_btn.grid(row=0, column=0, padx=10)
 
-        self.decrypt_btn = ctk.CTkButton(self, text="Decrypt File", fg_color="#FF5733", command=self.decrypt_file)
-        self.decrypt_btn.pack(pady=5)
+        self.decrypt_btn = ctk.CTkButton(self.action_frame, text="🔓 Decrypt File", fg_color="#b83e3e", width=160, height=40, command=self.decrypt_file)
+        self.decrypt_btn.grid(row=0, column=1, padx=10)
 
-        self.progress_label = ctk.CTkLabel(self, text="Progress:")
-        self.progress_label.pack(pady=5)
+        self.progress_label = ctk.CTkLabel(self, text="Ready")
+        self.progress_label.pack(pady=(20, 5))
 
         self.progress_bar = ctk.CTkProgressBar(self, width=500)
         self.progress_bar.set(0)
         self.progress_bar.pack(pady=5)
 
-        # --- Key Management Buttons ---
         self.key_frame = ctk.CTkFrame(self)
-        self.key_frame.pack(pady=15)
+        self.key_frame.pack(pady=30, padx=20, fill="x")
+        
+        key_lbl = ctk.CTkLabel(self.key_frame, text="Key Management", font=("Roboto", 14, "bold"))
+        key_lbl.pack(pady=5)
 
-        self.gen_key_btn = ctk.CTkButton(self.key_frame, text="Generate New Keys", fg_color="#28A745", command=self.generate_keys)
-        self.gen_key_btn.grid(row=0, column=0, padx=10)
+        self.gen_key_btn = ctk.CTkButton(self.key_frame, text="Generate New Keys", fg_color="#2e8b57", command=self.generate_keys)
+        self.gen_key_btn.pack(side="left", expand=True, padx=20, pady=10)
 
-        self.load_key_btn = ctk.CTkButton(self.key_frame, text="Load Existing Keys", fg_color="#FFC107", command=self.load_keys)
-        self.load_key_btn.grid(row=0, column=1, padx=10)
+        self.load_key_btn = ctk.CTkButton(self.key_frame, text="Load Existing Keys", fg_color="#d2691e", command=self.load_keys)
+        self.load_key_btn.pack(side="right", expand=True, padx=20, pady=10)
 
-        self.theme_label = ctk.CTkLabel(self, text="Theme:")
-        self.theme_label.pack(pady=5)
+        self.theme_switch = ctk.CTkSwitch(self, text="Dark Mode", command=self.toggle_theme, onvalue="Dark", offvalue="Light")
+        self.theme_switch.select() 
+        self.theme_switch.pack(pady=20)
 
-        self.theme_menu = ctk.CTkOptionMenu(self, values=["Dark", "Light", "Green", "Blue"], command=self.change_theme)
-        self.theme_menu.pack(pady=5)
+    def toggle_theme(self):
+        mode = self.theme_switch.get()
+        ctk.set_appearance_mode(mode)
 
-        self.status_label = ctk.CTkLabel(self, text="Ready.", font=("Segoe UI", 12))
-        self.status_label.pack(pady=15)
-
-    # --- FILE HANDLING ---
     def browse_file(self):
         file = filedialog.askopenfilename()
         if file:
             self.file_entry.delete(0, tk.END)
             self.file_entry.insert(0, file)
 
-    # --- ENCRYPTION/DECRYPTION ---
+    def update_progress_safe(self, value):
+        self.after(0, lambda: self.progress_bar.set(value / 100))
+
+    def update_status_safe(self, text, is_error=False):
+        color = "#ff5555" if is_error else "#ffffff" if ctk.get_appearance_mode() == "Dark" else "#000000"
+        self.after(0, lambda: self.progress_label.configure(text=text, text_color=color))
+
     def encrypt_file(self):
         if not self.public_key:
-            messagebox.showerror("Error", "⚠️ Load or generate keys first!")
+            messagebox.showwarning("Key Missing", "Please load or generate keys first!")
             return
+        
         file_path = self.file_entry.get().strip()
-        if not file_path or not os.path.exists(file_path):
-            messagebox.showerror("Error", "Select a valid file first.")
+        if not os.path.exists(file_path):
+            messagebox.showerror("File Error", "File not found!")
             return
 
-        self.status_label.configure(text="Encrypting...")
         self.progress_bar.set(0)
-        threading.Thread(target=self._encrypt_task, args=(file_path,)).start()
+        self.progress_label.configure(text="Encrypting...", text_color="white")
+        
+        threading.Thread(target=self._encrypt_task, args=(file_path,), daemon=True).start()
 
     def _encrypt_task(self, file_path):
-        def update_progress(value):
-            self.progress_bar.set(value / 100)
-            self.update_idletasks()
-
-        enc_file = hybrid_encrypt(file_path, self.public_key, progress_callback=update_progress)
-        self.status_label.configure(text=f"✅ Encrypted: {os.path.basename(enc_file)}")
+        try:
+            out = CryptoManager.hybrid_encrypt(file_path, self.public_key, self.update_progress_safe)
+            self.update_status_safe(f"Encryption Complete: {os.path.basename(out)}")
+            self.after(0, lambda: messagebox.showinfo("Success", "File Encrypted Successfully!"))
+        except Exception as e:
+            self.update_status_safe(f"Error: {str(e)}", True)
 
     def decrypt_file(self):
         if not self.private_key:
-            messagebox.showerror("Error", "⚠️ Load private key first!")
+            messagebox.showwarning("Key Missing", "Please load your private key first!")
             return
-        file_path = filedialog.askopenfilename(title="Select Encrypted File", filetypes=[("Encrypted Files", "*.enc")])
-        if not file_path:
-            return
+        
+        file_path = self.file_entry.get().strip()
+        if not os.path.exists(file_path):
+            file_path = filedialog.askopenfilename(title="Select Encrypted File", filetypes=[("Encrypted", "*.enc")])
+            if not file_path: return
 
-        self.status_label.configure(text="Decrypting...")
         self.progress_bar.set(0)
-        threading.Thread(target=self._decrypt_task, args=(file_path,)).start()
+        self.progress_label.configure(text="Decrypting & Verifying...", text_color="white")
+        
+        threading.Thread(target=self._decrypt_task, args=(file_path,), daemon=True).start()
 
     def _decrypt_task(self, file_path):
-        def update_progress(value):
-            self.progress_bar.set(value / 100)
-            self.update_idletasks()
-
-        dec_file = hybrid_decrypt(file_path, self.private_key, progress_callback=update_progress)
-        self.status_label.configure(text=f"✅ Decrypted: {os.path.basename(dec_file)}")
-
-    # --- KEY MANAGEMENT ---
-    def generate_keys(self):
-        password = simpledialog.askstring("Password", "Enter a password to protect your key:", show="*")
-        if not password:
-            messagebox.showerror("Error", "Password required to generate keys.")
-            return
-        self.private_key, self.public_key = generate_ecc_keys()
-        save_keys(self.private_key, self.public_key, password=password.encode())
-        messagebox.showinfo("Success", "✅ Keys generated and saved successfully.")
-        self.status_label.configure(text="Keys generated and saved.")
-
-    def load_keys(self):
-        password = simpledialog.askstring("Password", "Enter your key password:", show="*")
-        if not password:
-            return
         try:
-            self.private_key, self.public_key = load_keys(password=password.encode())
-            messagebox.showinfo("Success", "✅ Keys loaded successfully.")
-            self.status_label.configure(text="Keys loaded.")
+            out = CryptoManager.hybrid_decrypt(file_path, self.private_key, self.update_progress_safe)
+            self.update_status_safe(f"Decryption Complete: {os.path.basename(out)}")
+            self.after(0, lambda: messagebox.showinfo("Success", "File Decrypted & Verified!"))
+        except Exception as e:
+            self.update_status_safe("Decryption Failed: Integrity Check Failed or Wrong Key", True)
+            self.after(0, lambda: messagebox.showerror("Integrity Error", "Decryption failed.\nEither the password/key is wrong, or the file has been tampered with."))
+
+    def generate_keys(self):
+        pwd = simpledialog.askstring("Password", "Set a password for your private key:", show="*")
+        if not pwd: return
+        
+        try:
+            self.private_key, self.public_key = CryptoManager.generate_ecc_keys()
+            CryptoManager.save_keys(self.private_key, self.public_key, pwd.encode())
+            messagebox.showinfo("Keys Generated", "Keys saved to 'keys' folder.")
+            self.progress_label.configure(text="New Keys Loaded")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    # --- THEMES & DRAG-DROP ---
-    def change_theme(self, choice):
-        themes = {"Dark": "dark-blue", "Light": "light-blue", "Green": "green", "Blue": "blue"}
-        ctk.set_default_color_theme(themes.get(choice, "blue"))
-
-    def bind_drag_drop(self):
-        def drop(event):
-            file = event.data.strip("{}")
-            if os.path.isfile(file):
-                self.file_entry.delete(0, tk.END)
-                self.file_entry.insert(0, file)
+    def load_keys(self):
+        pwd = simpledialog.askstring("Password", "Enter private key password:", show="*")
+        if not pwd: return
+        
         try:
-            self.drop_target_register("DND_Files")
-            self.dnd_bind("<<Drop>>", drop)
-        except Exception:
-            pass
+            self.private_key, self.public_key = CryptoManager.load_keys(pwd.encode())
+            messagebox.showinfo("Success", "Keys loaded successfully.")
+            self.progress_label.configure(text="Keys Loaded Active")
+        except Exception as e:
+            messagebox.showerror("Load Error", "Incorrect password or missing key files.")
 
 if __name__ == "__main__":
     app = CipherFusionECC()
