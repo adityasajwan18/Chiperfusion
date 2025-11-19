@@ -4,28 +4,22 @@ import secrets
 import tkinter as tk
 from tkinter import filedialog, simpledialog, messagebox
 import customtkinter as ctk
-
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
-
 class CryptoManager:
-    
     @staticmethod
     def generate_ecc_keys():
         private_key = ec.generate_private_key(ec.SECP384R1())
         public_key = private_key.public_key()
         return private_key, public_key
-
     @staticmethod
     def save_keys(private_key, public_key, password: bytes, folder="keys"):
         if not os.path.exists(folder):
             os.makedirs(folder)
-
         with open(os.path.join(folder, "private_key.pem"), "wb") as f:
             f.write(
                 private_key.private_bytes(
@@ -34,7 +28,6 @@ class CryptoManager:
                     encryption_algorithm=serialization.BestAvailableEncryption(password),
                 )
             )
-
         with open(os.path.join(folder, "public_key.pem"), "wb") as f:
             f.write(
                 public_key.public_bytes(
@@ -42,20 +35,16 @@ class CryptoManager:
                     format=serialization.PublicFormat.SubjectPublicKeyInfo,
                 )
             )
-
     @staticmethod
     def load_keys(password: bytes, folder="keys"):
         try:
             with open(os.path.join(folder, "private_key.pem"), "rb") as f:
                 private_key = serialization.load_pem_private_key(f.read(), password=password)
-
             with open(os.path.join(folder, "public_key.pem"), "rb") as f:
                 public_key = serialization.load_pem_public_key(f.read())
-
             return private_key, public_key
         except Exception as e:
             raise ValueError("Invalid password or corrupted key files.") from e
-
     @staticmethod
     def hybrid_encrypt(file_path, public_key, progress_callback=None):
         eph_private_key = ec.generate_private_key(ec.SECP384R1())
@@ -64,16 +53,13 @@ class CryptoManager:
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-
         shared_key = eph_private_key.exchange(ec.ECDH(), public_key)
-        
         aes_key = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
             salt=None,
             info=b"ecc-hybrid-gcm"
         ).derive(shared_key)
-
         iv = secrets.token_bytes(12)
         encryptor = Cipher(algorithms.AES(aes_key), modes.GCM(iv)).encryptor()
 
