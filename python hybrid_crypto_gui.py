@@ -19,7 +19,7 @@ class CryptoManager:
     @staticmethod
     def save_keys(private_key, public_key, password: bytes, folder="keys"):
         if not os.path.exists(folder):
-            os.makedirs(folder)
+            os.makedirs(folder) 
         with open(os.path.join(folder, "private_key.pem"), "wb") as f:
             f.write(
                 private_key.private_bytes(
